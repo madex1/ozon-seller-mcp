@@ -3,6 +3,7 @@
 import os
 import json
 import asyncio
+from datetime import datetime, timedelta, timezone
 import httpx
 from mcp.server.fastmcp import FastMCP
 
@@ -10,6 +11,27 @@ mcp = FastMCP("ozon-seller")
 
 BASE_URL = "https://api-seller.ozon.ru"
 _client: httpx.AsyncClient | None = None
+
+
+def _load_env_file() -> None:
+    """Load .env file if present and variables not already set."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+
+_load_env_file()
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -33,11 +55,40 @@ def _get_client() -> httpx.AsyncClient:
     return _client
 
 
+def _to_rfc3339(date_str: str, is_end: bool = False) -> str:
+    """Normalize date string (YYYY-MM-DD or partial) to RFC3339 format."""
+    if not date_str:
+        return ""
+    if "T" in date_str:
+        if not date_str.endswith("Z"):
+            return date_str + "Z"
+        return date_str
+    time_part = "23:59:59Z" if is_end else "00:00:00Z"
+    return f"{date_str}T{time_part}"
+
+
 async def _post(path: str, body: dict | None = None) -> str:
     """Make a POST request to Ozon Seller API and return JSON string."""
     client = _get_client()
     try:
-        resp = await client.post(path, json=body or {})
+        resp = await client.post(path, json=body if body is not None else {})
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False, indent=2)
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.text
+        return json.dumps(
+            {"error": f"HTTP {e.response.status_code}", "detail": error_body},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+async def _get(path: str, params: dict | None = None) -> str:
+    """Make a GET request to Ozon Seller API and return JSON string."""
+    client = _get_client()
+    try:
+        resp = await client.get(path, params=params)
         resp.raise_for_status()
         return json.dumps(resp.json(), ensure_ascii=False, indent=2)
     except httpx.HTTPStatusError as e:
@@ -62,16 +113,14 @@ async def product_list(
     visibility: str = "ALL",
 ) -> str:
     """List seller's products. Visibility: ALL, VISIBLE, INVISIBLE, EMPTY_STOCK, NOT_MODERATED, MODERATED, DISABLED, STATE_FAILED, READY_TO_SUPPLY, VALIDATION_STATE_PENDING, VALIDATION_STATE_FAIL, VALIDATION_STATE_SUCCESS, TO_SUPPLY, IN_SALE, REMOVED_FROM_SALE, BAN_REASON_DUPLICATE_DESCRIPTION, BAN_REASON_MANUAL, BAN_REASON_LEGAL."""
-    body: dict = {"limit": limit, "visibility": visibility}
-    if last_id:
-        body["last_id"] = last_id
-    filt: dict = {}
+    filt: dict = {"visibility": visibility}
     if offer_id_filter:
         filt["offer_id"] = offer_id_filter
     if product_id_filter:
         filt["product_id"] = product_id_filter
-    if filt:
-        body["filter"] = filt
+    body: dict = {"filter": filt, "limit": limit}
+    if last_id:
+        body["last_id"] = last_id
     return await _post("/v3/product/list", body)
 
 
@@ -80,22 +129,38 @@ async def product_info(product_id: int = 0, offer_id: str = "", sku: int = 0) ->
     """Get detailed info about a single product by product_id, offer_id, or sku."""
     body: dict = {}
     if product_id:
-        body["product_id"] = product_id
-    if offer_id:
-        body["offer_id"] = offer_id
-    if sku:
-        body["sku"] = sku
-    return await _post("/v2/product/info", body)
+        body["product_id"] = [product_id]
+    elif offer_id:
+        body["offer_id"] = [offer_id]
+    elif sku:
+        body["sku"] = [sku]
+    else:
+        return json.dumps(
+            {"error": "Provide at least one of product_id, offer_id, or sku"},
+            ensure_ascii=False,
+        )
+    return await _post("/v3/product/info/list", body)
 
 
 @mcp.tool()
-async def product_info_list(product_id: list[int] | None = None, offer_id: list[str] | None = None) -> str:
-    """Get detailed info for multiple products (prices, barcode, moderation status). Provide product_id list or offer_id list."""
+async def product_info_list(
+    product_id: list[int] | None = None,
+    offer_id: list[str] | None = None,
+    sku: list[int] | None = None,
+) -> str:
+    """Get detailed info for multiple products (prices, barcode, moderation status). Provide product_id list, offer_id list, or sku list."""
     body: dict = {}
     if product_id:
         body["product_id"] = product_id
     if offer_id:
         body["offer_id"] = offer_id
+    if sku:
+        body["sku"] = sku
+    if not body:
+        return json.dumps(
+            {"error": "Provide at least one of product_id, offer_id, or sku"},
+            ensure_ascii=False,
+        )
     return await _post("/v3/product/info/list", body)
 
 
@@ -109,14 +174,12 @@ async def product_info_attributes(
     sort_dir: str = "ASC",
 ) -> str:
     """Get product attributes/characteristics."""
-    body: dict = {"limit": limit}
     filt: dict = {}
     if product_id:
         filt["product_id"] = product_id
     if offer_id:
         filt["offer_id"] = offer_id
-    if filt:
-        body["filter"] = filt
+    body: dict = {"filter": filt, "limit": limit}
     if last_id:
         body["last_id"] = last_id
     if sort_by:
@@ -150,9 +213,12 @@ async def product_unarchive(product_id: list[int]) -> str:
 
 
 @mcp.tool()
-async def product_delete(product_id: list[int]) -> str:
-    """Delete products that haven't been assigned an SKU yet."""
-    return await _post("/v2/products/delete", {"product_id": product_id})
+async def product_delete(offer_ids: list[str]) -> str:
+    """Delete products that haven't been assigned an SKU yet by offer_ids list."""
+    return await _post(
+        "/v2/products/delete",
+        {"products": [{"offer_id": oid} for oid in offer_ids]},
+    )
 
 
 @mcp.tool()
@@ -163,6 +229,10 @@ async def product_description(product_id: int = 0, offer_id: str = "") -> str:
         body["product_id"] = product_id
     if offer_id:
         body["offer_id"] = offer_id
+    if not body:
+        return json.dumps(
+            {"error": "Provide product_id or offer_id"}, ensure_ascii=False
+        )
     return await _post("/v1/product/info/description", body)
 
 
@@ -192,14 +262,12 @@ async def prices_info(
     last_id: str = "",
 ) -> str:
     """Get prices, commissions, and marketing data for products."""
-    body: dict = {"limit": limit}
     filt: dict = {}
     if product_id_filter:
         filt["product_id"] = product_id_filter
     if offer_id_filter:
         filt["offer_id"] = offer_id_filter
-    if filt:
-        body["filter"] = filt
+    body: dict = {"filter": filt, "limit": limit}
     if last_id:
         body["last_id"] = last_id
     return await _post("/v5/product/info/prices", body)
@@ -222,14 +290,12 @@ async def stocks_info(
     last_id: str = "",
 ) -> str:
     """Get FBS/rFBS stock levels for products."""
-    body: dict = {"limit": limit}
     filt: dict = {}
     if product_id_filter:
         filt["product_id"] = product_id_filter
     if offer_id_filter:
         filt["offer_id"] = offer_id_filter
-    if filt:
-        body["filter"] = filt
+    body: dict = {"filter": filt, "limit": limit}
     if last_id:
         body["last_id"] = last_id
     return await _post("/v4/product/info/stocks", body)
@@ -242,9 +308,12 @@ async def stocks_update(stocks: list[dict]) -> str:
 
 
 @mcp.tool()
-async def stocks_by_warehouse_fbs(sku: list[int]) -> str:
-    """Get FBS stock by warehouse for given SKUs."""
-    return await _post("/v1/product/info/stocks-by-warehouse/fbs", {"sku": sku})
+async def stocks_by_warehouse_fbs(sku: list[str], limit: int = 100) -> str:
+    """Get FBS stock by warehouse for given SKUs (list of SKU strings or ints). Limit between 1 and 1000."""
+    return await _post(
+        "/v2/product/info/stocks-by-warehouse/fbs",
+        {"sku": [str(s) for s in sku], "limit": limit},
+    )
 
 
 # ── FBS Orders (Fulfilled by Seller) ────────────────────────────────────────
@@ -263,20 +332,34 @@ async def fbs_unfulfilled_list(
     delivering_date_to: str = "",
 ) -> str:
     """List unprocessed FBS shipments. Status: awaiting_packaging, awaiting_deliver, arbitration, delivering, driver_pickup, delivered, cancelled."""
-    body: dict = {"limit": limit, "offset": offset, "dir": sort_dir, "sort_by": sort_by}
-    filt: dict = {}
+    now = datetime.now(timezone.utc)
+    c_from = (
+        _to_rfc3339(cutoff_from)
+        if cutoff_from
+        else (now - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+    )
+    c_to = (
+        _to_rfc3339(cutoff_to, is_end=True)
+        if cutoff_to
+        else (now + timedelta(days=14)).strftime("%Y-%m-%dT23:59:59Z")
+    )
+    filt: dict = {
+        "cutoff_from": c_from,
+        "cutoff_to": c_to,
+    }
     if status:
         filt["status"] = status
-    if cutoff_from:
-        filt["cutoff_from"] = cutoff_from
-    if cutoff_to:
-        filt["cutoff_to"] = cutoff_to
     if delivering_date_from:
-        filt["delivering_date_from"] = delivering_date_from
+        filt["delivering_date_from"] = _to_rfc3339(delivering_date_from)
     if delivering_date_to:
-        filt["delivering_date_to"] = delivering_date_to
-    if filt:
-        body["filter"] = filt
+        filt["delivering_date_to"] = _to_rfc3339(delivering_date_to, is_end=True)
+    body: dict = {
+        "dir": sort_dir,
+        "filter": filt,
+        "limit": limit,
+        "offset": offset,
+        "sort_by": sort_by,
+    }
     return await _post("/v3/posting/fbs/unfulfilled/list", body)
 
 
@@ -287,20 +370,27 @@ async def fbs_posting_list(
     since: str = "",
     to: str = "",
     status: str = "",
-    sort_by: str = "created_at",
     sort_dir: str = "ASC",
 ) -> str:
-    """List FBS shipments with filters. Dates in RFC3339 format (2024-01-01T00:00:00Z)."""
-    body: dict = {"limit": limit, "offset": offset, "dir": sort_dir}
-    filt: dict = {}
-    if since:
-        filt["since"] = since
-    if to:
-        filt["to"] = to
+    """List FBS shipments with filters. Dates in RFC3339 format or YYYY-MM-DD. Defaults to last 30 days if not set."""
+    now = datetime.now(timezone.utc)
+    since_rfc = (
+        _to_rfc3339(since)
+        if since
+        else (now - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+    )
+    to_rfc = (
+        _to_rfc3339(to, is_end=True)
+        if to
+        else now.strftime("%Y-%m-%dT23:59:59Z")
+    )
+    filt: dict = {
+        "since": since_rfc,
+        "to": to_rfc,
+    }
     if status:
         filt["status"] = status
-    if filt:
-        body["filter"] = filt
+    body: dict = {"dir": sort_dir, "filter": filt, "limit": limit, "offset": offset}
     return await _post("/v3/posting/fbs/list", body)
 
 
@@ -314,13 +404,15 @@ async def fbs_posting_get(posting_number: str) -> str:
 async def fbs_ship(posting_number: str, packages: list[dict]) -> str:
     """Pack and confirm FBS shipment. packages: [{products: [{product_id, quantity}]}]."""
     return await _post(
-        "/v2/posting/fbs/ship",
+        "/v4/posting/fbs/ship",
         {"posting_number": posting_number, "packages": packages},
     )
 
 
 @mcp.tool()
-async def fbs_cancel(posting_number: str, cancel_reason_id: int, cancel_reason_message: str = "") -> str:
+async def fbs_cancel(
+    posting_number: str, cancel_reason_id: int, cancel_reason_message: str = ""
+) -> str:
     """Cancel an FBS shipment."""
     body: dict = {
         "posting_number": posting_number,
@@ -334,30 +426,44 @@ async def fbs_cancel(posting_number: str, cancel_reason_id: int, cancel_reason_m
 @mcp.tool()
 async def fbs_cancel_reasons() -> str:
     """Get list of available cancellation reasons for FBS."""
-    return await _post("/v1/posting/fbs/cancel-reason")
+    return await _post("/v2/posting/fbs/cancel-reason/list")
 
 
 @mcp.tool()
 async def fbs_package_label(posting_number: list[str]) -> str:
     """Generate PDF shipping labels for FBS postings. Returns base64-encoded PDF. Max 20 postings."""
-    return await _post("/v2/posting/fbs/package-label", {"posting_number": posting_number})
+    return await _post(
+        "/v2/posting/fbs/package-label", {"posting_number": posting_number}
+    )
 
 
 @mcp.tool()
-async def fbs_set_tracking_number(posting_number: str, tracking_number: str) -> str:
+async def fbs_set_tracking_number(
+    posting_number: str, tracking_number: str
+) -> str:
     """Set tracking number for an FBS shipment."""
     return await _post(
-        "/v2/posting/fbs/tracking-number/set",
-        {"posting_number": posting_number, "tracking_number": tracking_number},
+        "/v2/fbs/posting/tracking-number/set",
+        {
+            "tracking_numbers": [
+                {
+                    "posting_number": posting_number,
+                    "tracking_number": tracking_number,
+                }
+            ]
+        },
     )
 
 
 @mcp.tool()
 async def fbs_act_create(delivery_method_id: int, departure_date: str) -> str:
-    """Create a transfer certificate (act) for FBS delivery."""
+    """Create a transfer certificate (act) for FBS delivery. departure_date: YYYY-MM-DD or RFC3339."""
     return await _post(
         "/v2/posting/fbs/act/create",
-        {"delivery_method_id": delivery_method_id, "departure_date": departure_date},
+        {
+            "delivery_method_id": delivery_method_id,
+            "departure_date": _to_rfc3339(departure_date),
+        },
     )
 
 
@@ -380,13 +486,13 @@ async def fbo_posting_list(
     sort_by: str = "created_at",
     sort_dir: str = "ASC",
 ) -> str:
-    """List FBO shipments. Dates in RFC3339 format."""
-    body: dict = {"limit": limit, "offset": offset, "dir": sort_dir}
+    """List FBO shipments. Dates in RFC3339 format or YYYY-MM-DD."""
+    body: dict = {"dir": sort_dir, "limit": limit, "offset": offset}
     filt: dict = {}
     if since:
-        filt["since"] = since
+        filt["since"] = _to_rfc3339(since)
     if to:
-        filt["to"] = to
+        filt["to"] = _to_rfc3339(to, is_end=True)
     if status:
         filt["status"] = status
     if filt:
@@ -406,37 +512,43 @@ async def fbo_posting_get(posting_number: str) -> str:
 @mcp.tool()
 async def warehouse_list() -> str:
     """List seller's warehouses."""
-    return await _post("/v1/warehouse/list")
+    return await _post("/v2/warehouse/list")
 
 
 @mcp.tool()
-async def warehouse_fbo_list() -> str:
-    """List FBO (Ozon) warehouses."""
-    return await _post("/v1/warehouse/fbo/list")
+async def warehouse_fbo_list(
+    search: str = "Москва", supply_types: list[str] | None = None
+) -> str:
+    """List FBO (Ozon) warehouses for supplies. search: city/address query (min 4 chars). supply_types: ['CREATE_TYPE_DIRECT', 'CREATE_TYPE_CROSSDOCK']."""
+    types = supply_types or ["CREATE_TYPE_DIRECT", "CREATE_TYPE_CROSSDOCK"]
+    body: dict = {
+        "filter_by_supply_type": types,
+        "search": search or "Москва",
+    }
+    return await _post("/v1/warehouse/fbo/list", body)
 
 
 # ── Categories ───────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-async def category_tree(category_id: int = 0, language: str = "DEFAULT") -> str:
-    """Get the product category tree. Optionally specify parent category_id."""
-    body: dict = {"language": language}
-    if category_id:
-        body["category_id"] = category_id
-    return await _post("/v1/category/tree", body)
+async def category_tree(language: str = "DEFAULT") -> str:
+    """Get the description categories tree (categories and type_ids for product creation/attributes)."""
+    return await _post("/v1/description-category/tree", {"language": language})
 
 
 @mcp.tool()
 async def category_attributes(
-    category_id: int, attribute_type: str = "ALL", language: str = "DEFAULT"
+    description_category_id: int,
+    type_id: int,
+    language: str = "DEFAULT",
 ) -> str:
-    """Get attributes for a product category."""
+    """Get attributes for a product description category and type."""
     return await _post(
-        "/v1/category/attribute",
+        "/v1/description-category/attribute",
         {
-            "category_id": [category_id],
-            "attribute_type": attribute_type,
+            "description_category_id": description_category_id,
+            "type_id": type_id,
             "language": language,
         },
     )
@@ -444,17 +556,22 @@ async def category_attributes(
 
 @mcp.tool()
 async def category_attribute_values(
-    category_id: int, attribute_id: int, limit: int = 100, last_value_id: int = 0
+    description_category_id: int,
+    type_id: int,
+    attribute_id: int,
+    limit: int = 100,
+    last_value_id: int = 0,
 ) -> str:
     """Get dictionary values for a category attribute."""
     body: dict = {
-        "category_id": category_id,
+        "description_category_id": description_category_id,
+        "type_id": type_id,
         "attribute_id": attribute_id,
         "limit": limit,
     }
     if last_value_id:
         body["last_value_id"] = last_value_id
-    return await _post("/v1/category/attribute/values", body)
+    return await _post("/v1/description-category/attribute/values", body)
 
 
 # ── Analytics ────────────────────────────────────────────────────────────────
@@ -475,9 +592,9 @@ async def analytics_data(
     body: dict = {
         "date_from": date_from,
         "date_to": date_to,
-        "metrics": metrics,
         "dimension": dimension,
         "limit": limit,
+        "metrics": metrics,
         "offset": offset,
     }
     if sort:
@@ -488,7 +605,9 @@ async def analytics_data(
 
 
 @mcp.tool()
-async def analytics_stocks(limit: int = 100, offset: int = 0, warehouse_type: str = "") -> str:
+async def analytics_stocks(
+    limit: int = 100, offset: int = 0, warehouse_type: str = ""
+) -> str:
     """Get stock on warehouses report."""
     body: dict = {"limit": limit, "offset": offset}
     if warehouse_type:
@@ -500,49 +619,53 @@ async def analytics_stocks(limit: int = 100, offset: int = 0, warehouse_type: st
 
 
 @mcp.tool()
+async def finance_accrual_by_day(date: str) -> str:
+    """Get daily financial accruals and fees breakdown. date: YYYY-MM-DD."""
+    return await _post("/v1/finance/accrual/by-day", {"date": date})
+
+
+@mcp.tool()
+async def finance_decompensation(date: str) -> str:
+    """Get monthly withholdings report (fines, anti-fraud, promotions, insurance). date: YYYY-MM."""
+    return await _post("/v1/finance/decompensation", {"date": date})
+
+
+@mcp.tool()
+async def finance_compensation(date: str) -> str:
+    """Get monthly compensations report (refunds to seller). date: YYYY-MM."""
+    return await _post("/v1/finance/compensation", {"date": date})
+
+
+@mcp.tool()
 async def finance_transactions(
-    date_from: str,
-    date_to: str,
-    operation_type: list[str] | None = None,
-    posting_number: str = "",
-    transaction_type: str = "all",
-    page: int = 1,
-    page_size: int = 50,
+    date_from: str = "",
+    date_to: str = "",
+    date: str = "",
 ) -> str:
-    """Get detailed financial transactions. Max 1-month window. Dates: YYYY-MM-DD. operation_type: OperationAgentDeliveredToCustomer, OperationReturnGoodsToSeller, etc."""
-    body: dict = {
-        "filter": {
-            "date": {"from": f"{date_from}T00:00:00.000Z", "to": f"{date_to}T23:59:59.999Z"},
-            "transaction_type": transaction_type,
-        },
-        "page": page,
-        "page_size": page_size,
-    }
-    if operation_type:
-        body["filter"]["operation_type"] = operation_type
-    if posting_number:
-        body["filter"]["posting_number"] = posting_number
-    return await _post("/v3/finance/transaction/list", body)
+    """Get financial accruals for a date. Note: Ozon disabled v3 transaction list on July 6, 2026; this retrieves daily accruals via /v1/finance/accrual/by-day."""
+    target_date = date or date_from or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if "T" in target_date:
+        target_date = target_date.split("T")[0]
+    return await _post("/v1/finance/accrual/by-day", {"date": target_date})
 
 
 @mcp.tool()
-async def finance_totals(date_from: str, date_to: str) -> str:
-    """Get aggregated financial transaction totals for a period. Dates: YYYY-MM-DD."""
-    return await _post(
-        "/v3/finance/transaction/totals",
-        {
-            "date": {
-                "from": f"{date_from}T00:00:00.000Z",
-                "to": f"{date_to}T23:59:59.999Z",
-            }
-        },
-    )
-
-
-@mcp.tool()
-async def finance_realization(date: str) -> str:
-    """Get monthly sales/returns report. date: YYYY-MM (year-month)."""
-    return await _post("/v2/finance/realization", {"date": date})
+async def finance_realization(
+    date: str = "", year: int = 0, month: int = 0
+) -> str:
+    """Get monthly sales/returns realization report. date: YYYY-MM (e.g. 2026-09), or specify year and month."""
+    if date and ("-" in date):
+        parts = date.split("-")
+        y = int(parts[0])
+        m = int(parts[1])
+    elif year and month:
+        y = year
+        m = month
+    else:
+        now = datetime.now(timezone.utc)
+        y = now.year if now.month > 1 else now.year - 1
+        m = now.month - 1 if now.month > 1 else 12
+    return await _post("/v2/finance/realization", {"month": m, "year": y})
 
 
 # ── Returns ──────────────────────────────────────────────────────────────────
@@ -550,12 +673,25 @@ async def finance_realization(date: str) -> str:
 
 @mcp.tool()
 async def returns_report_create(
-    filter_type: str = "all", delivery_schema: str = "fbs"
+    date_from: str = "",
+    date_to: str = "",
+    status: int = 1,
 ) -> str:
-    """Generate a returns report. filter_type: all, created, received, completed. delivery_schema: fbs, fbo."""
+    """Generate a returns report. date_from, date_to: YYYY-MM-DD or RFC3339 (defaults to last 30 days). status: 1 (all/accepted) to 14."""
+    now = datetime.now(timezone.utc)
+    df = (
+        _to_rfc3339(date_from)
+        if date_from
+        else (now - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+    )
+    dt = (
+        _to_rfc3339(date_to, is_end=True)
+        if date_to
+        else now.strftime("%Y-%m-%dT23:59:59Z")
+    )
     return await _post(
         "/v2/report/returns/create",
-        {"filter": {"filter_type": filter_type, "delivery_schema": delivery_schema}},
+        {"filter": {"date_from": df, "date_to": dt, "status": status}},
     )
 
 
@@ -563,39 +699,45 @@ async def returns_report_create(
 
 
 @mcp.tool()
-async def chat_list(limit: int = 30, offset: int = 0, unread_only: bool = False) -> str:
-    """List chats with buyers."""
+async def chat_list(
+    limit: int = 30, offset: int = 0, unread_only: bool = False
+) -> str:
+    """List chats with buyers. Note: Access requires active Premium Plus subscription."""
     body: dict = {"limit": limit, "offset": offset}
     if unread_only:
         body["filter"] = {"unread_only": True}
-    return await _post("/v1/chat/list", body)
+    return await _post("/v3/chat/list", body)
 
 
 @mcp.tool()
-async def chat_history(chat_id: str, limit: int = 50, from_message_id: int = 0) -> str:
-    """Get chat message history."""
+async def chat_history(
+    chat_id: str, limit: int = 50, from_message_id: int = 0
+) -> str:
+    """Get chat message history by chat_id/guid. Note: Access requires active Premium Plus subscription."""
     body: dict = {"chat_id": chat_id, "limit": limit}
     if from_message_id:
         body["from_message_id"] = from_message_id
-    return await _post("/v1/chat/history", body)
+    return await _post("/v3/chat/history", body)
 
 
 @mcp.tool()
 async def chat_send_message(chat_id: str, text: str) -> str:
-    """Send a message in a chat with a buyer."""
-    return await _post("/v1/chat/send/message", {"chat_id": chat_id, "text": text})
+    """Send a message in a chat with a buyer. Note: Access requires active Premium Plus subscription."""
+    return await _post(
+        "/v1/chat/send/message", {"chat_id": chat_id, "text": text}
+    )
 
 
 @mcp.tool()
 async def chat_start(posting_number: str) -> str:
-    """Start a new chat with a buyer by posting number."""
+    """Start a new chat with a buyer by posting number. Note: Access requires active Premium Plus subscription."""
     return await _post("/v1/chat/start", {"posting_number": posting_number})
 
 
 @mcp.tool()
 async def chat_mark_read(chat_id: str) -> str:
-    """Mark chat as read."""
-    return await _post("/v1/chat/updates", {"chat_id": chat_id})
+    """Mark chat as read by chat_id/guid. Note: Access requires active Premium Plus subscription."""
+    return await _post("/v2/chat/read", {"chat_id": chat_id})
 
 
 # ── Reviews ──────────────────────────────────────────────────────────────────
@@ -608,8 +750,9 @@ async def review_list(
     last_id: str = "",
     is_answered: bool | None = None,
 ) -> str:
-    """List product reviews."""
-    body: dict = {"limit": limit, "sort_dir": sort_dir}
+    """List product reviews. Limit must be between 20 and 100 (automatically clamped)."""
+    safe_limit = max(20, min(limit, 100))
+    body: dict = {"limit": safe_limit, "sort_dir": sort_dir}
     if last_id:
         body["last_id"] = last_id
     if is_answered is not None:
@@ -634,6 +777,15 @@ async def review_reply(review_id: str, text: str) -> str:
 # ── Rating ───────────────────────────────────────────────────────────────────
 
 
+DEFAULT_RATINGS = [
+    "rating_shipment_delay_cb",
+    "rating_general_indicator_fbs_rfbs",
+    "rating_delivery_complaints_fbo",
+    "rating_delivery_complaints_fbs",
+    "rating_review_avg_score_total",
+]
+
+
 @mcp.tool()
 async def rating_summary() -> str:
     """Get current seller rating summary."""
@@ -641,11 +793,27 @@ async def rating_summary() -> str:
 
 
 @mcp.tool()
-async def rating_history(date_from: str, date_to: str) -> str:
-    """Get seller rating for a period. Dates: YYYY-MM-DD."""
+async def rating_history(
+    date_from: str = "",
+    date_to: str = "",
+    ratings: list[str] | None = None,
+) -> str:
+    """Get seller rating history for a period. Dates: YYYY-MM-DD or RFC3339 (defaults to last 30 days). ratings: list of rating keys (optional, defaults to key metrics)."""
+    now = datetime.now(timezone.utc)
+    df = (
+        _to_rfc3339(date_from)
+        if date_from
+        else (now - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+    )
+    dt = (
+        _to_rfc3339(date_to, is_end=True)
+        if date_to
+        else now.strftime("%Y-%m-%dT23:59:59Z")
+    )
+    r_list = ratings or DEFAULT_RATINGS
     return await _post(
         "/v1/rating/history",
-        {"date_from": date_from, "date_to": date_to},
+        {"date_from": df, "date_to": dt, "ratings": r_list},
     )
 
 
@@ -655,17 +823,13 @@ async def rating_history(date_from: str, date_to: str) -> str:
 @mcp.tool()
 async def promotions_list() -> str:
     """List available promotions."""
-    client = _get_client()
-    try:
-        resp = await client.get("/v1/actions")
-        resp.raise_for_status()
-        return json.dumps(resp.json(), ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    return await _get("/v1/actions")
 
 
 @mcp.tool()
-async def promotion_candidates(action_id: int, limit: int = 100, offset: int = 0) -> str:
+async def promotion_candidates(
+    action_id: int, limit: int = 100, offset: int = 0
+) -> str:
     """Find products eligible for a promotion."""
     return await _post(
         "/v1/actions/candidates",
@@ -674,7 +838,9 @@ async def promotion_candidates(action_id: int, limit: int = 100, offset: int = 0
 
 
 @mcp.tool()
-async def promotion_products(action_id: int, limit: int = 100, offset: int = 0) -> str:
+async def promotion_products(
+    action_id: int, limit: int = 100, offset: int = 0
+) -> str:
     """Get products already in a promotion."""
     return await _post(
         "/v1/actions/products",
@@ -704,7 +870,6 @@ async def promotion_deactivate(action_id: int, product_ids: list[int]) -> str:
 
 
 def main():
-    import asyncio
     asyncio.run(_run())
 
 
