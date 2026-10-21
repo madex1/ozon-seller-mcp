@@ -55,6 +55,15 @@ MCP-сервер для [Ozon Seller API](https://docs.ozon.ru/api/seller/) — 
 10. **Инфраструктура:**
     - Реализована автоматическая загрузка файла `.env` при локальном запуске или через скрипты без явных переменных окружения.
     - Добавлен хелпер нормализации дат `_to_rfc3339` (поддерживает как `YYYY-MM-DD`, так и полные ISO/RFC3339 строки).
+    - Добавлен хелпер нормализации денежных значений `_normalize_money` в формат Ozon Money (`{"amount": "...", "currency": "RUB"}`).
+
+11. **Акции и автодобавление (Promotions & Auto-add):**
+    - `promotion_products_update` (`/v1/actions/products/update`) — универсальный метод добавления/обновления/удаления товаров в акциях на основе предельной цены `action_price` (заменяет устаревший `/v1/actions/products/activate`).
+    - `promotion_activate` — перенаправлен на современный эндпоинт `/v1/actions/products/update`.
+    - `auto_add_products_list` (`/v2/actions/auto-add/products/list`) — получение списка товаров из автодобавления в акцию.
+    - `auto_add_products_candidates` (`/v2/actions/auto-add/products/candidates`) — получение списка кандидатов для автодобавления.
+    - `auto_add_products_delete` (`/v2/actions/auto-add/products/delete`) — удаление товаров из автодобавления в акцию.
+    - `auto_add_products_update` (`/v2/actions/auto-add/products/update`) — добавление/обновление товаров в автодобавлении в акцию.
 
 ## Возможности
 
@@ -71,7 +80,7 @@ MCP-сервер для [Ozon Seller API](https://docs.ozon.ru/api/seller/) — 
 - **Чаты** — переписка с покупателями (v3 API, для тарифа Premium Plus)
 - **Отзывы** — просмотр и ответы на отзывы
 - **Рейтинг** — текущий рейтинг продавца и история по метрикам
-- **Акции** — список акций, добавление/удаление товаров
+- **Акции** — список акций (`promotions_list`), кандидаты (`promotion_candidates`), товары в акции (`promotion_products`), управление товарами (`promotion_products_update`, `promotion_activate`, `promotion_deactivate`), а также автодобавление v2 (`auto_add_products_list`, `auto_add_products_candidates`, `auto_add_products_delete`, `auto_add_products_update`)
 
 ## Установка
 

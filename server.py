@@ -67,6 +67,19 @@ def _to_rfc3339(date_str: str, is_end: bool = False) -> str:
     return f"{date_str}T{time_part}"
 
 
+def _normalize_money(
+    val: float | int | str | dict, default_currency: str = "RUB"
+) -> dict:
+    """Normalize money value to Ozon Money format: {'amount': '...', 'currency': 'RUB'}."""
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, float):
+        val_str = f"{val:.2f}".rstrip("0").rstrip(".")
+    else:
+        val_str = str(val)
+    return {"amount": val_str, "currency": default_currency}
+
+
 async def _post(path: str, body: dict | None = None) -> str:
     """Make a POST request to Ozon Seller API and return JSON string."""
     client = _get_client()
@@ -849,21 +862,132 @@ async def promotion_products(
 
 
 @mcp.tool()
-async def promotion_activate(action_id: int, products: list[dict]) -> str:
-    """Add products to a promotion. products: [{product_id, action_price}]."""
+async def promotion_products_update(action_id: int, products: list[dict]) -> str:
+    """Add, update, or remove products in a promotion based on action_price (POST /v1/actions/products/update).
+    Universal method replacing deprecated /v1/actions/products/activate.
+    products: list of items [{product_id: int, action_price: number | str | {amount, currency}, stock: optional int}].
+    If action_price <= required promo price, product is added; if > promo price, product is removed.
+    Max 1000 items.
+    """
+    normalized_products = []
+    for p in products:
+        item = dict(p)
+        if "action_price" in item and not isinstance(item["action_price"], dict):
+            item["action_price"] = _normalize_money(item["action_price"])
+        normalized_products.append(item)
     return await _post(
-        "/v1/actions/products/activate",
-        {"action_id": action_id, "products": products},
+        "/v1/actions/products/update",
+        {"action_id": action_id, "products": normalized_products},
     )
 
 
 @mcp.tool()
+async def promotion_activate(action_id: int, products: list[dict]) -> str:
+    """Add or update products in a promotion.
+    Delegates to modern POST /v1/actions/products/update endpoint.
+    products: [{product_id: int, action_price: number | str | {amount, currency}, stock: optional int}].
+    """
+    return await promotion_products_update(action_id=action_id, products=products)
+
+
+@mcp.tool()
 async def promotion_deactivate(action_id: int, product_ids: list[int]) -> str:
-    """Remove products from a promotion."""
+    """Remove products from a promotion (POST /v1/actions/products/deactivate).
+    Note: For actions with unified price logic (like elastic boosting), removal is performed
+    via promotion_products_update by setting action_price higher than threshold, or via auto_add_products_delete.
+    """
     return await _post(
         "/v1/actions/products/deactivate",
         {"action_id": action_id, "product_ids": product_ids},
     )
+
+
+@mcp.tool()
+async def auto_add_products_list(
+    action_id: int,
+    auto_add_date: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> str:
+    """Get list of products in promotion auto-addition (POST /v2/actions/auto-add/products/list).
+    action_id: Promotion ID (from promotions_list).
+    auto_add_date: Auto-addition date in RFC3339 format (available dates are in auto_add_dates field of promotions_list).
+    limit: Number of items to return (1 to 100, default 100).
+    offset: Pagination offset (default 0).
+    """
+    body = {
+        "action_id": action_id,
+        "auto_add_date": _to_rfc3339(auto_add_date) if "T" not in auto_add_date else auto_add_date,
+        "limit": limit,
+        "offset": offset,
+    }
+    return await _post("/v2/actions/auto-add/products/list", body)
+
+
+@mcp.tool()
+async def auto_add_products_candidates(
+    action_id: int,
+    auto_add_date: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> str:
+    """Get list of candidate products eligible for promotion auto-addition (POST /v2/actions/auto-add/products/candidates).
+    action_id: Promotion ID (from promotions_list).
+    auto_add_date: Auto-addition date in RFC3339 format (from auto_add_dates field of promotions_list).
+    limit: Number of items to return (1 to 100, default 100).
+    offset: Pagination offset (default 0).
+    """
+    body = {
+        "action_id": action_id,
+        "auto_add_date": _to_rfc3339(auto_add_date) if "T" not in auto_add_date else auto_add_date,
+        "limit": limit,
+        "offset": offset,
+    }
+    return await _post("/v2/actions/auto-add/products/candidates", body)
+
+
+@mcp.tool()
+async def auto_add_products_delete(
+    action_id: int,
+    auto_add_date: str,
+    product_ids: list[int],
+) -> str:
+    """Remove products from promotion auto-addition (POST /v2/actions/auto-add/products/delete).
+    action_id: Promotion ID.
+    auto_add_date: Auto-addition date in RFC3339 format.
+    product_ids: List of product IDs to remove (1 to 1000 items).
+    """
+    body = {
+        "action_id": action_id,
+        "auto_add_date": _to_rfc3339(auto_add_date) if "T" not in auto_add_date else auto_add_date,
+        "product_ids": product_ids,
+    }
+    return await _post("/v2/actions/auto-add/products/delete", body)
+
+
+@mcp.tool()
+async def auto_add_products_update(
+    action_id: int,
+    auto_add_date: str,
+    products: list[dict],
+) -> str:
+    """Add or update products in promotion auto-addition (POST /v2/actions/auto-add/products/update).
+    action_id: Promotion ID.
+    auto_add_date: Auto-addition date in RFC3339 format.
+    products: List of product items [{id: int, action_price: optional number | str | {amount, currency}}]. Max 1000 items.
+    """
+    normalized_products = []
+    for p in products:
+        item = dict(p)
+        if "action_price" in item and not isinstance(item["action_price"], dict):
+            item["action_price"] = _normalize_money(item["action_price"])
+        normalized_products.append(item)
+    body = {
+        "action_id": action_id,
+        "auto_add_date": _to_rfc3339(auto_add_date) if "T" not in auto_add_date else auto_add_date,
+        "products": normalized_products,
+    }
+    return await _post("/v2/actions/auto-add/products/update", body)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
