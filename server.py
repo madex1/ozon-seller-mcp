@@ -256,11 +256,39 @@ async def product_attributes_update(items: list[dict]) -> str:
 
 
 @mcp.tool()
-async def product_pictures_import(product_id: int, images: list[str]) -> str:
-    """Upload product images by URLs. images is a list of image URLs."""
+async def product_pictures_import(
+    images: list[str],
+    offer_id: list[str] | None = None,
+    product_id: int | list[int] | None = None,
+) -> str:
+    """Upload product images by URLs (POST /v2/product/pictures/import, items by offer_id).
+
+    images: list of image URLs, main photo first.
+    offer_id: list of seller offer_ids (= МойСклад code). Preferred.
+    product_id: int or list; resolved to offer_id automatically when offer_id is not given.
+    """
+    if not images:
+        return json.dumps({"error": "images is empty"}, ensure_ascii=False)
+
+    offers: list[str] = list(offer_id or [])
+    if not offers:
+        if product_id is None:
+            return json.dumps(
+                {"error": "Provide offer_id or product_id"}, ensure_ascii=False
+            )
+        pids = product_id if isinstance(product_id, list) else [product_id]
+        info = json.loads(await _post("/v3/product/info/list", {"product_id": pids}))
+        items = info.get("items") or info.get("result", {}).get("items") or []
+        offers = [str(it.get("offer_id")) for it in items if it.get("offer_id")]
+        if not offers:
+            return json.dumps(
+                {"error": "cannot resolve offer_id for product_id", "response": info},
+                ensure_ascii=False,
+            )
+
     return await _post(
-        "/v1/product/pictures/import",
-        {"product_id": product_id, "images": images},
+        "/v2/product/pictures/import",
+        {"items": [{"offer_id": oid, "images": images} for oid in offers]},
     )
 
 
