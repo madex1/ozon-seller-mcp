@@ -990,6 +990,227 @@ async def auto_add_products_update(
     return await _post("/v2/actions/auto-add/products/update", body)
 
 
+# ── Certificates (CertificationAPI) ──────────────────────────────────────────
+
+
+@mcp.tool()
+async def certificate_list(
+    page: int = 1,
+    page_size: int = 100,
+    status: str = "",
+    status_code: str = "",
+    type: str = "",
+    type_code: str = "",
+    offer_id: str = "",
+) -> str:
+    """List quality certificates and declarations of conformity (POST /v1/product/certificate/list).
+    page: Page number (starts from 1).
+    page_size: Number of certificates per page (1 to 100, default 100).
+    status / status_code: Filter by status ('approved', 'verification', 'awaiting_verification', 'declined').
+    type / type_code: Filter by document type ('certificate_of_conformity', 'declaration', 'certificate_of_registration', 'registration_certificate', 'refused_letter', 'veterinary_cover_document', 'safety_data_sheet').
+    offer_id: Filter certificates attached to a specific offer_id.
+    """
+    body: dict = {
+        "page": max(1, page),
+        "page_size": max(1, min(100, page_size)),
+    }
+    st = status or status_code
+    if st:
+        body["status"] = st
+    tp = type or type_code
+    if tp:
+        body["type"] = tp
+    if offer_id:
+        body["offer_id"] = offer_id
+    return await _post("/v1/product/certificate/list", body)
+
+
+@mcp.tool()
+async def certificate_info(
+    certificate_number: str = "",
+    certificate_id: int = 0,
+) -> str:
+    """Get detailed information about a single certificate by certificate_number or certificate_id (POST /v1/product/certificate/info).
+    certificate_number: Certificate document number (e.g. 'ЕАЭС N RU Д-CN.РА06.В.35800/26').
+    certificate_id: Certificate ID. If provided without certificate_number, finds it via certificate_list.
+    """
+    if certificate_number:
+        return await _post(
+            "/v1/product/certificate/info",
+            {"certificate_number": certificate_number},
+        )
+    if certificate_id:
+        page = 1
+        while page <= 10:
+            res_str = await _post(
+                "/v1/product/certificate/list",
+                {"page": page, "page_size": 100},
+            )
+            try:
+                res_data = json.loads(res_str)
+                certs = res_data.get("result", {}).get("certificates", [])
+                for cert in certs:
+                    if cert.get("certificate_id") == certificate_id:
+                        return json.dumps(
+                            {"result": cert}, ensure_ascii=False, indent=2
+                        )
+                if page >= res_data.get("result", {}).get("page_count", 1) or not certs:
+                    break
+            except Exception:
+                break
+            page += 1
+        return json.dumps(
+            {"error": f"Certificate with certificate_id {certificate_id} not found"},
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {"error": "Provide either certificate_number or certificate_id"},
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+async def certificate_products_list(
+    certificate_id: int,
+    limit: int = 100,
+    last_id: int = 0,
+    product_status_code: str = "",
+) -> str:
+    """List products (product_id, sku, status) bound to a quality certificate (POST /v1/product/certificate/products/list).
+    certificate_id: Certificate ID.
+    limit: Number of items to return (1 to 1000, default 100).
+    last_id: ID of the last product from previous response for pagination cursor (0 for first page).
+    product_status_code: Optional filter by status on certificate ('approved', 'declined', 'awaiting_verification').
+    """
+    body: dict = {
+        "certificate_id": certificate_id,
+        "limit": max(1, min(1000, limit)),
+    }
+    if last_id > 0:
+        body["last_id"] = last_id
+    if product_status_code:
+        body["product_status_code"] = product_status_code
+    return await _post("/v1/product/certificate/products/list", body)
+
+
+@mcp.tool()
+async def certificate_bind(
+    certificate_id: int,
+    skus: list[int] | None = None,
+    product_id: list[int] | None = None,
+    product_ids: list[int] | None = None,
+) -> str:
+    """Bind products to a quality certificate (POST /v1/product/certificate/bind).
+    Specify either skus (recommended by Ozon) or product_id.
+    certificate_id: Certificate ID.
+    skus: List of product SKU identifiers to link.
+    product_id: List of product_id identifiers to link.
+    """
+    p_ids = product_id or product_ids
+    if not skus and not p_ids:
+        return json.dumps(
+            {"error": "Provide either 'skus' or 'product_id' to bind"},
+            ensure_ascii=False,
+        )
+    if skus and p_ids:
+        return json.dumps(
+            {"error": "Specify only one of 'skus' or 'product_id', not both"},
+            ensure_ascii=False,
+        )
+    body: dict = {"certificate_id": certificate_id}
+    if skus:
+        body["skus"] = skus
+    else:
+        body["product_id"] = p_ids
+    return await _post("/v1/product/certificate/bind", body)
+
+
+@mcp.tool()
+async def certificate_unbind(
+    certificate_id: int,
+    skus: list[int] | None = None,
+    product_id: list[int] | None = None,
+    product_ids: list[int] | None = None,
+) -> str:
+    """Unbind products from a quality certificate (POST /v1/product/certificate/unbind).
+    Specify either skus (recommended by Ozon) or product_id.
+    certificate_id: Certificate ID.
+    skus: List of product SKU identifiers to unlink.
+    product_id: List of product_id identifiers to unlink.
+    """
+    p_ids = product_id or product_ids
+    if not skus and not p_ids:
+        return json.dumps(
+            {"error": "Provide either 'skus' or 'product_id' to unbind"},
+            ensure_ascii=False,
+        )
+    if skus and p_ids:
+        return json.dumps(
+            {"error": "Specify only one of 'skus' or 'product_id', not both"},
+            ensure_ascii=False,
+        )
+    body: dict = {"certificate_id": certificate_id}
+    if skus:
+        body["skus"] = skus
+    else:
+        body["product_id"] = p_ids
+    return await _post("/v1/product/certificate/unbind", body)
+
+
+@mcp.tool()
+async def certificate_types() -> str:
+    """Get directory of certificate document types (GET /v1/product/certificate/types).
+    Returns list of document types and codes (declaration, certificate_of_conformity, refused_letter, etc.).
+    """
+    return await _get("/v1/product/certificate/types")
+
+
+@mcp.tool()
+async def certificate_accordance_types() -> str:
+    """Get list of conformity accordance types (GET /v2/product/certificate/accordance-types/list).
+    Returns base types (ГОСТ, ТР РФ, ТР ТС) and hazard types (SDS, ПБ хим. продукции, отказное письмо).
+    """
+    return await _get("/v2/product/certificate/accordance-types/list")
+
+
+@mcp.tool()
+async def certificate_statuses() -> str:
+    """Get list of possible certificate statuses (POST /v1/product/certificate/status/list)."""
+    return await _post("/v1/product/certificate/status/list")
+
+
+@mcp.tool()
+async def certificate_rejection_reasons() -> str:
+    """Get list of possible certificate rejection reasons (POST /v1/product/certificate/rejection_reasons/list)."""
+    return await _post("/v1/product/certificate/rejection_reasons/list")
+
+
+@mcp.tool()
+async def certificate_certified_categories(
+    page: int = 1,
+    page_size: int = 100,
+) -> str:
+    """Get list of product categories and types requiring quality certification (POST /v2/product/certification/list).
+    page: Page number (starts from 1).
+    page_size: Number of categories per page (1 to 1000, default 100).
+    """
+    body: dict = {
+        "page": max(1, page),
+        "page_size": max(1, min(1000, page_size)),
+    }
+    return await _post("/v2/product/certification/list", body)
+
+
+@mcp.tool()
+async def certificate_delete(certificate_id: int) -> str:
+    """Delete a quality certificate (POST /v1/product/certificate/delete).
+    certificate_id: Certificate ID to delete.
+    """
+    return await _post(
+        "/v1/product/certificate/delete", {"certificate_id": certificate_id}
+    )
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 

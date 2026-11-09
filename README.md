@@ -65,11 +65,26 @@ MCP-сервер для [Ozon Seller API](https://docs.ozon.ru/api/seller/) — 
     - `auto_add_products_delete` (`/v2/actions/auto-add/products/delete`) — удаление товаров из автодобавления в акцию.
     - `auto_add_products_update` (`/v2/actions/auto-add/products/update`) — добавление/обновление товаров в автодобавлении в акцию.
 
+12. **Сертификаты соответствия (CertificationAPI):**
+    - Добавлен полноценный набор методов для работы с сертификатами качества и декларациями соответствия:
+      - `certificate_list` (`/v1/product/certificate/list`) — получение списка сертификатов с фильтрацией по статусу, типу и `offer_id`.
+      - `certificate_info` (`/v1/product/certificate/info`) — детальная информация по номеру документа (`certificate_number`) или идентификатору (`certificate_id`).
+      - `certificate_products_list` (`/v1/product/certificate/products/list`) — список товаров (product_id, sku, статус), привязанных к сертификату, с курсорной пагинацией (`last_id`).
+      - `certificate_bind` (`/v1/product/certificate/bind`) — привязка товаров к сертификату по `skus` или `product_id`.
+      - `certificate_unbind` (`/v1/product/certificate/unbind`) — отвязка товаров от сертификата по `skus` или `product_id`.
+      - `certificate_types` (`/v1/product/certificate/types`) — справочник типов документов.
+      - `certificate_accordance_types` (`/v2/product/certificate/accordance-types/list`) — типы соответствия (ГОСТ, ТР РФ, ТР ТС, SDS и др.).
+      - `certificate_statuses` (`/v1/product/certificate/status/list`) — справочник возможных статусов сертификатов.
+      - `certificate_rejection_reasons` (`/v1/product/certificate/rejection_reasons/list`) — причины отклонения документов модерацией.
+      - `certificate_certified_categories` (`/v2/product/certification/list`) — категории и типы товаров, требующие обязательной сертификации.
+      - `certificate_delete` (`/v1/product/certificate/delete`) — удаление сертификата.
+
 ## Возможности
 
 - **Товары** — просмотр (`product_list`, `product_info`, `product_info_list`), создание, обновление, архивация, удаление, характеристики, загрузка изображений
 - **Цены** — получение и обновление цен (`prices_info`, `prices_update`)
 - **Остатки** — просмотр и обновление остатков (`stocks_info`, `stocks_update`, `stocks_by_warehouse_fbs` v2)
+- **Сертификаты** — список сертификатов (`certificate_list`), детальная информация (`certificate_info`), товары на сертификате (`certificate_products_list`), привязка/отвязка товаров (`certificate_bind`, `certificate_unbind`), справочники типов и соответствий (`certificate_types`, `certificate_accordance_types`), причины отклонения (`certificate_rejection_reasons`), статусы (`certificate_statuses`), сертифицируемые категории (`certificate_certified_categories`), удаление (`certificate_delete`)
 - **Заказы FBS** — список, несобранные заказы, детали, сборка/отправка (`fbs_ship` v4), отмена, этикетки, трекинг (`fbs_set_tracking_number` v2)
 - **Заказы FBO** — список и детали
 - **Склады** — список складов продавца (`warehouse_list` v2) и складов FBO для поставок (`warehouse_fbo_list`)
